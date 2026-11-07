@@ -1,0 +1,10 @@
+# Keil build outputs
+*.uvguix.*
+Objects/
+Listings/
+*.build_log.htm
+*.o
+*.crf
+*.d
+*.dep
+*.lnp

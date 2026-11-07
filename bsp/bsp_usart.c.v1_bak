@@ -1,0 +1,119 @@
+/**
+  ******************************************************************************
+  * @file    bsp_usart.c
+  * @author  Kamingo
+  * @brief   USART1 IDLE+DMA 接收 / DMA 发送
+  * @date    2026-10-30
+  * @version 1.0
+  * @note    1. 接口与 Taurus26 Bsp/bsp_usart.c 一致：初始化时注册回调，
+  *             IDLE 中断里统一取 DMA 剩余计数并分发。
+  *          2. F407 用 DMA_Stream_TypeDef->NDTR 取剩余字节（H7 版同写法）。
+  *          3. 用 HAL_UART_AbortReceive 而不是 HAL_UART_DMAStop：
+  *             只停接收，不影响同串口的 DMA 发送（26 版注释同结论）。
+  ******************************************************************************
+  */
+
+/* Includes ------------------------------------------------------------------*/
+#include "bsp_usart.h"
+#include <stddef.h>
+
+/* Private define ------------------------------------------------------------*/
+
+/* Private variables ---------------------------------------------------------*/
+usart_user_rx_handle_t usart1_rx_user_handle =
+{
+  .huart = NULL,
+  .rx_buffer_size = 0,
+  .rx_buffer = NULL,
+  .callback_f = NULL
+};
+
+static volatile uint32_t s_uart1_rx_frame_count = 0;
+
+/**
+  * @brief 初始化用户串口：使能 IDLE 中断 + 启动 DMA 接收
+  * @param huart   UART 句柄
+  * @param Rxbuffer 接收缓冲
+  * @param length  缓冲长度
+  * @param fun     用户回调（IDLE 时调用）
+  * @retval None
+  */
+void bsp_user_usart_Init(UART_HandleTypeDef *huart, uint8_t *Rxbuffer, uint32_t length, usart_call_back fun)
+{
+  if ((huart == NULL) || (Rxbuffer == NULL) || (length == 0U))
+  {
+    Error_Handler();
+  }
+
+  if (huart->Instance == USART1)
+  {
+    usart1_rx_user_handle.huart = huart;
+    usart1_rx_user_handle.rx_buffer = Rxbuffer;
+    usart1_rx_user_handle.rx_buffer_size = (uint16_t)length;
+    usart1_rx_user_handle.callback_f = fun;
+
+    __HAL_UART_CLEAR_IDLEFLAG(huart);
+    __HAL_UART_ENABLE_IT(huart, UART_IT_IDLE);
+    (void)HAL_UART_Receive_DMA(huart, Rxbuffer, length);
+  }
+}
+
+/**
+  * @brief IDLE 空闲中断处理：取本次 DMA 接收长度并回调
+  * @param p 用户串口句柄
+  * @retval None
+  * @note  在 USART1_IRQHandler 中 HAL_UART_IRQHandler 之后调用。
+  */
+void bsp_user_usart_Receive_Handler(usart_user_rx_handle_t *p)
+{
+  uint16_t rx_len;
+
+  if ((p == NULL) || (p->huart == NULL) || (p->huart->hdmarx == NULL))
+  {
+    return;
+  }
+
+  if (__HAL_UART_GET_FLAG(p->huart, UART_FLAG_IDLE) != RESET)
+  {
+    /* 清 IDLE 标志，否则会反复进中断 */
+    __HAL_UART_CLEAR_IDLEFLAG(p->huart);
+
+    /* 只中止接收 DMA，保留发送通道 */
+    (void)HAL_UART_AbortReceive(p->huart);
+
+    /* 剩余计数 -> 本次收到多少字节 */
+    rx_len = (uint16_t)(p->rx_buffer_size -
+              ((DMA_Stream_TypeDef *)p->huart->hdmarx->Instance)->NDTR);
+
+    s_uart1_rx_frame_count++;
+
+    if (p->callback_f != NULL)
+    {
+      (void)p->callback_f(p->rx_buffer, rx_len);
+    }
+
+    /* 重新使能 IDLE 并重启 DMA 接收 */
+    __HAL_UART_ENABLE_IT(p->huart, UART_IT_IDLE);
+    (void)HAL_UART_Receive_DMA(p->huart, p->rx_buffer, p->rx_buffer_size);
+  }
+}
+
+/**
+  * @brief USART1 DMA 发送
+  * @param msg 数据
+  * @param len 长度
+  * @retval HAL 状态
+  */
+uint32_t Uart1_Transmit(uint8_t *msg, uint16_t len)
+{
+  return HAL_UART_Transmit_DMA(&huart1, msg, len);
+}
+
+/**
+  * @brief 获取 USART1 收到的帧数（调试/看门狗用）
+  * @retval 帧计数
+  */
+uint32_t Uart1_GetRxFrameCount(void)
+{
+  return s_uart1_rx_frame_count;
+}
