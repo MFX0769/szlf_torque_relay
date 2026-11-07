@@ -111,4 +111,22 @@ void HAL_ResumeTick(void)
   __HAL_TIM_ENABLE_IT(&htim10, TIM_IT_UPDATE);
 }
 
+/**
+  * @brief  Period elapsed callback in non-blocking mode.
+  * @note   2026-11-07 修复：本文件此前缺此回调，HAL_IncTick() 从未被调用，
+  *         uwTick 恒为 0，导致 HAL_PCD_Init -> USB_SetCurrentMode 里的
+  *         HAL_Delay() 永久死等（实测 uwTick=0、TIM10 SR.UIF=1 挂起、
+  *         NVIC 已使能、BASEPRI/PRIMASK 均为 0）。
+  *         标准 CubeMX timebase_tim 写法，TIM10 每 1ms 递增 HAL tick。
+  * @param  htim TIM handle
+  * @retval None
+  */
+void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
+{
+  if (htim->Instance == TIM10)
+  {
+    HAL_IncTick();
+  }
+}
+
 /************************ (C) COPYRIGHT STMicroelectronics *****END OF FILE****/

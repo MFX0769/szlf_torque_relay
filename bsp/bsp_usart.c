@@ -156,24 +156,51 @@ uint8_t Uart1_SendPush(const uint8_t *msg, uint16_t len)
 /**
   * @brief TX 泵：若 DMA 空闲且队列非空，启动下一段连续区发送
   * @note  任务上下文与 DMA 完成中断都会调用；临界区防双重启动。
+  *        2026-11-07 修复：本函数会被 HAL_UART_TxCpltCallback（DMA TC 中断）
+  *        调用，原先无条件用 taskENTER_CRITICAL() —— 该 API 只允许任务上下文，
+  *        在中断里会触发 configASSERT 死循环。实测卡点：PC=vPortEnterCritical、
+  *        LR=Uart1_TxPump，表现为发完第 1 帧后整机停摆（LED 不闪、计数冻结）。
+  *        改为按 __get_IPSR() 自动选择任务/中断版本临界区。
   */
 void Uart1_TxPump(void)
 {
-  uint16_t tail;
-  uint16_t head;
+  uint16_t tail = 0U;
+  uint16_t head = 0U;
   uint16_t cont_len;
+  BaseType_t need_send = pdFALSE;
+  BaseType_t in_isr = (__get_IPSR() != 0U) ? pdTRUE : pdFALSE;
+  UBaseType_t saved = 0U;
 
-  taskENTER_CRITICAL();
-  if ((s_tx_busy != 0U) || (s_tx_head == s_tx_tail))
+  if (in_isr != pdFALSE)
   {
-    taskEXIT_CRITICAL();
-    return;
+    saved = taskENTER_CRITICAL_FROM_ISR();
+  }
+  else
+  {
+    taskENTER_CRITICAL();
   }
 
-  s_tx_busy = 1U;
-  tail = s_tx_tail;
-  head = s_tx_head;
-  taskEXIT_CRITICAL();
+  if ((s_tx_busy == 0U) && (s_tx_head != s_tx_tail))
+  {
+    s_tx_busy = 1U;
+    tail = s_tx_tail;
+    head = s_tx_head;
+    need_send = pdTRUE;
+  }
+
+  if (in_isr != pdFALSE)
+  {
+    taskEXIT_CRITICAL_FROM_ISR(saved);
+  }
+  else
+  {
+    taskEXIT_CRITICAL();
+  }
+
+  if (need_send == pdFALSE)
+  {
+    return;
+  }
 
   /* 本段连续长度：绕回则先发到环形缓冲末尾 */
   cont_len = (head > tail) ? (uint16_t)(head - tail)
@@ -193,9 +220,13 @@ void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
 {
   if (huart->Instance == USART1)
   {
+    /* 中断上下文：push 侧（任务）会同时读 tail，必须用 ISR 版临界区保护。
+     * 2026-11-07：原先无保护直接改 tail/sent/busy。 */
+    UBaseType_t saved = taskENTER_CRITICAL_FROM_ISR();
     s_tx_tail = (uint16_t)((s_tx_tail + huart->TxXferSize) % BSP_USART_TX_RING_SIZE);
     s_tx_sent += huart->TxXferSize;
     s_tx_busy = 0U;
+    taskEXIT_CRITICAL_FROM_ISR(saved);
 
     /* 队列里还有数据就在中断里接着发 */
     Uart1_TxPump();
