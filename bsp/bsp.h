@@ -17,6 +17,7 @@ extern "C" {
 
 /* Includes ------------------------------------------------------------------*/
 #include "bsp_adc.h"
+#include "bsp_button.h"
 #include "bsp_capture.h"
 #include "bsp_led.h"
 #include "bsp_usart.h"

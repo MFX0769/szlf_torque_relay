@@ -19,6 +19,7 @@ void Bsp_Init(void)
 {
   Bsp_Led_Init();
   Bsp_Adc_Init();      /* 启动 ADC1 连续 DMA */
+  Bsp_Button_Init();   /* PA0 板载 K1 输入（去皮按键，v2.1） */
   Bsp_Capture_Init();  /* 启动 TIM4_CH1 输入捕获 */
   Bsp_Iwdg_Init();     /* 默认空实现 */
 }

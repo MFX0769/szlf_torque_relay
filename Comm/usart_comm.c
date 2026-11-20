@@ -14,6 +14,7 @@
 #include "usart_comm.h"
 #include "status_task.h"
 #include "relay_task.h"   /* Relay_SetProfile：切档命令 */
+#include "app_brake.h"    /* Brake_RequestCal：刹车端点标定命令（v2.2） */
 #include <string.h>
 
 /* Private variables ---------------------------------------------------------*/
@@ -52,15 +53,41 @@ static uint32_t User_USART1_RxCpltCallback(uint8_t *buf, uint16_t len)
   /* 收到任意字节即认为链路活着（GD32 侧可选发心跳/命令） */
   wdg_user_set_bit(WDG_BIT_BSP_RELAY_UART);
 
-  /* 命令通道：ASCII '1'/'2'/'3' = 切 P1/P2/P3 档（其余字节忽略） */
+  /* 命令通道：ASCII "PR1"/"PR2"/"PR3" = 切 P1/P2/P3 档（其余忽略）。
+   * 2026-11-10 改：原实现单个 '1'/'2'/'3' 就切档，而本回调在中断上下文，
+   * Relay_SetProfile 里的 taskENTER_CRITICAL 会 configASSERT 死锁；且 GD 的
+   * 串口文本里数字极多，会随机触发。现在：①要求 "PR"+digit 三字节序列；
+   * ②ISR 里只置请求（Relay_RequestProfile），实际切换在 relay_task。
+   * 2026-11-14 v2.2 加："BR1"=记录松开端 adc_max、"BR2"=记录捏死端 adc_min
+   * （ Brake_Tick 任务侧执行取当前滤波值，端点标定 RAM 生效掉电丢）。
+   * 2026-11-14 v2.3 加行程校准状态机命令："BRC"=进校准(LO)、"BRN"=LO→HI、
+   * "BRA"=apply、"BRX"=取消、"BRQ"=查询（均回 0x05 事件帧，见 prot_relay.h）。 */
   if ((buf != NULL) && (len > 0U))
   {
     uint16_t i;
-    for (i = 0U; i < len; i++)
+    for (i = 0U; (uint16_t)(i + 2U) < len; i++)
     {
-      if ((buf[i] >= '1') && (buf[i] <= '3'))
+      if ((buf[i] == 'P') && (buf[i + 1U] == 'R') &&
+          (buf[i + 2U] >= '1') && (buf[i + 2U] <= '3'))
       {
-        (void)Relay_SetProfile((uint8_t)(buf[i] - '1'));
+        Relay_RequestProfile((uint8_t)(buf[i + 2U] - '1'));
+      }
+      if ((buf[i] == 'B') && (buf[i + 1U] == 'R') &&
+          ((buf[i + 2U] == '1') || (buf[i + 2U] == '2')))
+      {
+        Brake_RequestCal((uint8_t)(buf[i + 2U] - '0'));
+      }
+      if ((buf[i] == 'B') && (buf[i + 1U] == 'R'))
+      {
+        if (buf[i + 2U] == 'C')      { Brake_RequestCalCmd(BRAKE_CAL_CMD_START); }
+        else if (buf[i + 2U] == 'N') { Brake_RequestCalCmd(BRAKE_CAL_CMD_NEXT); }
+        else if (buf[i + 2U] == 'A') { Brake_RequestCalCmd(BRAKE_CAL_CMD_APPLY); }
+        else if (buf[i + 2U] == 'X') { Brake_RequestCalCmd(BRAKE_CAL_CMD_CANCEL); }
+        else if (buf[i + 2U] == 'Q') { Brake_RequestCalCmd(BRAKE_CAL_CMD_QUERY); }
+        else
+        {
+          /* 其余忽略 */
+        }
       }
     }
     memset(buf, 0, len);

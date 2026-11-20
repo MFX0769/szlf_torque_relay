@@ -510,6 +510,16 @@
               <FilePath>../bsp/bsp_adc.c</FilePath>
             </File>
             <File>
+              <FileName>bsp_hall.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../bsp/bsp_hall.c</FilePath>
+            </File>
+            <File>
+              <FileName>bsp_button.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../bsp/bsp_button.c</FilePath>
+            </File>
+            <File>
               <FileName>bsp_capture.c</FileName>
               <FileType>1</FileType>
               <FilePath>../bsp/bsp_capture.c</FilePath>
@@ -565,6 +575,16 @@
           <GroupName>Application/AppCtrl</GroupName>
           <Files>
             <File>
+              <FileName>app_brake.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../app/app_brake.c</FilePath>
+            </File>
+            <File>
+              <FileName>debug_task.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../app/debug_task.c</FilePath>
+            </File>
+            <File>
               <FileName>relay_task.c</FileName>
               <FileType>1</FileType>
               <FilePath>../app/relay_task.c</FilePath>
@@ -589,6 +609,11 @@
         <Group>
           <GroupName>Application/Comm</GroupName>
           <Files>
+            <File>
+              <FileName>tx_sched.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Comm/tx_sched.c</FilePath>
+            </File>
             <File>
               <FileName>usart_comm.c</FileName>
               <FileType>1</FileType>

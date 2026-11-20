@@ -27,6 +27,10 @@ uint8_t Relay_SetProfile(uint8_t idx);
 uint8_t Relay_GetProfile(void);
 const char *Relay_ProfileName(uint8_t idx);
 
+/* 2026-11-10: 中断上下文只能"请求"切档，实际切换在 relay_task 里做
+ * （Relay_SetProfile 内含 taskENTER_CRITICAL，ISR 里调用会 configASSERT 死锁）。 */
+void Relay_RequestProfile(uint8_t idx);
+
 #ifdef __cplusplus
 }
 #endif

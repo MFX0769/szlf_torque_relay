@@ -74,7 +74,7 @@ static void Capture_ProcessSnapshots(void)
     {
       uint32_t rpm10 = ((uint32_t)diff * RPM_GATED_NUMERATOR) /
                        ((uint32_t)PULSES_PER_REV * CADENCE_WINDOW_MS * k);
-      s_rpm_x10 = (rpm10 > 0xFFFFU) ? 0xFFFFU : (uint16_t)rpm10;
+      s_rpm_x10 = (rpm10 > CADENCE_RPM_MAX_X10) ? CADENCE_RPM_MAX_X10 : (uint16_t)rpm10;
     }
   }
   /* diff==0：保持上一窗 rpm，2s 超时统一清零（见 IsTimeout） */
@@ -174,7 +174,7 @@ void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef *htim)
         if (dt > 0U)
         {
           uint32_t rpm10 = RPM_X10_NUMERATOR / ((uint32_t)PULSES_PER_REV * (uint32_t)dt);
-          s_rpm_x10 = (rpm10 > 0xFFFFU) ? 0xFFFFU : (uint16_t)rpm10;
+          s_rpm_x10 = (rpm10 > CADENCE_RPM_MAX_X10) ? CADENCE_RPM_MAX_X10 : (uint16_t)rpm10;
         }
       }
       else
@@ -195,8 +195,10 @@ void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef *htim)
 /* ==================== 公共接口（两方案签名一致） ==================== */
 
 /**
-  * @brief 读取 rpm*10；超时返回 0
+  * @brief 读取 rpm*10；陈旧或超时返回 0
   * @retval rpm*10
+  * @note  2026-11-08：不再"保持到 2s 超时"，>CADENCE_STALE_MS 无脉冲即冲刷为 0，
+  *        避免下游把旧踏频当当前值（用户实测 PA211 侧数值保持）。
   */
 uint16_t Bsp_Capture_GetRpmX10(void)
 {
@@ -207,7 +209,37 @@ uint16_t Bsp_Capture_GetRpmX10(void)
   {
     return 0;
   }
+  if (Bsp_Capture_IsStale() != 0U)
+  {
+    /* 冲刷旧值：陈旧时不再输出上一窗结果 */
+    s_rpm_x10 = 0;
+    return 0;
+  }
+  if (s_rpm_x10 > CADENCE_RPM_MAX_X10)
+  {
+    s_rpm_x10 = CADENCE_RPM_MAX_X10; /* 物理上限门控 */
+  }
   return s_rpm_x10;
+}
+
+/**
+  * @brief 踏频陈旧判定（>CADENCE_STALE_MS 无新脉冲）
+  * @retval 1=陈旧，值不可用
+  */
+uint8_t Bsp_Capture_IsStale(void)
+{
+#if (CADENCE_CAPTURE_MODE == CAPTURE_MODE_GATED_DMA)
+  if (s_have_pulse == 0U)
+  {
+    return 1U;
+  }
+#else
+  if (s_have_last == 0U)
+  {
+    return 1U;
+  }
+#endif
+  return (uint8_t)((HAL_GetTick() - s_last_pulse_tick) > CADENCE_STALE_MS);
 }
 
 /**

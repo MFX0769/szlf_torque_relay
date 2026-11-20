@@ -27,6 +27,9 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "relay_task.h"
+#include "debug_task.h"
+#include "relay_config.h"
+#include "tx_sched.h"
 #include "status_task.h"
 /* USER CODE END Includes */
 
@@ -95,13 +98,26 @@ void MX_FREERTOS_Init(void)
   /* taskENTER_CRITICAL 与 RM25/26 一致：建任务期间屏蔽调度 */
   taskENTER_CRITICAL();
 
+  /* v2.4：USART1 上行单一发送调度队列（须先于 relay/debug 任务，二者入队前就绪） */
+  TxSched_Init();
+
   /* relay_task: 50Hz 采样/换算/组帧/发送 */
   osThreadDef(relayTask, relay_task, osPriorityAboveNormal, 0, 512);
   relay_task_t = osThreadCreate(osThread(relayTask), NULL);
 
+  /* tx_sched_task: USART1 上行单一发送任务（v2.4；出队→Uart1_SendPush 串行化） */
+  osThreadDef(txSchedTask, tx_sched_task, osPriorityAboveNormal, 0, 256);
+  osThreadCreate(osThread(txSchedTask), NULL);
+
   /* status_task: 心跳 LED + 软件看门狗位图（26 版范式） */
   osThreadDef(statusTask, status_task, osPriorityNormal, 0, 256);
   status_task_t = osThreadCreate(osThread(statusTask), NULL);
+
+#if RELAY_DEBUG_PRINT
+  /* debug_task: 调试文本打印（v2.2；RELAY_DEBUG_PRINT=1 时替代二进制帧流） */
+  osThreadDef(debugTask, debug_task, osPriorityBelowNormal, 0, 512);
+  osThreadCreate(osThread(debugTask), NULL);
+#endif
 
   taskEXIT_CRITICAL();
   /* USER CODE END RTOS_THREADS */

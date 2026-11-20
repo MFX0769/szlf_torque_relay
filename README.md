@@ -257,6 +257,33 @@ AA 55 09 01 00 39 30 00 00 84 03 01 BE A9
 
 CRC 计算结果 `0xA9BE`，低字节 `BE` 在前。
 
+> 注意：本节上文是 v1（14B）旧描述；**实际帧格式以代码为准**
+> （`Protocol/prot_relay.h` v2：16B 含 `tx_tick`，`relay_config.h` 协议段）。
+
+### 6.2.1 协议 v2.1：按键去皮扩展（2026-11-12）
+
+板上用户按键 K1（PA0/WK_UP）按一下 → 中继板把当时滤波后的原始力矩读数
+记为新 `offset`；此后**cmd=0x01 帧布局一字不动，`torque_mNm` 永远是原始值**。
+校正值与事件走新增帧，向后兼容：
+
+| cmd | 帧长 | 用途 | 内容 |
+|---|---|---|---|
+| `0x01` | 16B | 原始帧（不变） | `torque_mNm` = 原始值，字段布局同 v2 |
+| `0x03` | 16B | 校正帧（新增） | 布局与 0x01 完全一致，`torque_mNm` 位置放 `corrected = raw - offset`；未去皮时 offset=0、corrected==raw |
+| `0x02` | 23B | 去皮事件帧（新增，每次按压 1 帧） | `AA 55 \| len=17 \| cmd=0x02 \| seq \| tare_tick(u32 LE) \| raw_before(i32) \| offset_mnm(i32) \| corrected(i32) \| crc16`（CRC 覆盖前 21B，参数同 §6.1） |
+
+- `flags` 新增 **bit4 = `RELAY_FLAG_TARE_EVENT`（0x10）**：去皮事件后 1000ms
+  内，0x01/0x03 帧都置位，供下游捕边沿；老解析器按保留位忽略即可。
+- `seq` 约定：**主 seq 只属于 cmd=0x01 帧**（对 GD 现网对账保持连续）；
+  0x03/0x02 辅帧用独立序号（互不消耗）。GD 侧 `pa211_link.c` 状态机对
+  len/cmd 不匹配的帧逐字节重同步丢弃且不更新对账状态——若辅帧消耗
+  主 seq，GD 会把 0x01 序列判成 0,2,4... 全部 gap 丢帧，故必须分离。
+- 带宽：稳态 2×16B×帧率；P1 档（50Hz/115200）=1600B/s ≈ 14% 占用。
+- 取舍：offset 数值不进 0x01 帧（16B 无空位，改布局会破坏现网），
+  上位机如需持续校正值直接解析 0x03 帧即可；GD 侧现网只见
+  `flags bit4`（`pa211_link.h` 对 flags 原样透传不解释）。
+- offset 不持久化：断电重启后 offset=0（corrected==raw），再按一次即恢复。
+
 ### 6.3 发送节奏与丢帧统计
 
 - 50Hz（20ms 一帧），14B/帧 → 700B/s，115200 余量很大。
@@ -547,3 +574,72 @@ STM32=有线透传，够简单、结构与 RM/CubeMX 完全同构；串口为主
 - AfterMake 未配 fromelf 出 bin：`fromelf --bin --output=...bin ...axf` 手动
 - 档位切换瞬间 TX 队列清空（丢帧由 seq 对账）；滤波窗切换丢窗内旧值
 - USB 下行（CDC_Receive_FS）预留空壳，命令走 USART1
+
+## v2.2 变更（2026-11-14，刹车霍尔通道；编译 0E/0W，debug 版已烧验证 VOFA 出流）
+
+### 功能增量
+- **刹车霍尔通道（HAL4395，PA3=ADC123_IN3）**：拆自遥控器扳机+环形磁铁，刹车量=路测数据标记/训练特征（非控制联锁）。选型正本=踏频仓 `develop_log/knowledge/刹车信号选型_线性霍尔与STM32接入_20261113.md`（含 HAL4395 手册口径：Enable 接地才工作/单极 S 面/零点 3.0V 捏下降/CL≤0.5nF）。
+- ADC1 改双通道扫描（rank1=PA2 力矩、rank2=PA3 刹车），`bsp_adc` 双路 32 点块平均（`bsp_adc_sample_t.brake_raw`）；副作用=块率 3.4→1.7kHz（力矩块平均窗 9.4→19ms，+5ms 固定时延，P1 档 160ms 滑均主导可接受）。
+- `bsp/bsp_hall.c/h`（新 305 行）：设备层移植自 rc_remote f8b2e9d(2026-06-11) `devices/hall/hall_sensor.c`（HAL4395 时代版；当前工作区是 08 月后 TMAG 重构版不可作源）。硬件读数改 `Bsp_Adc_GetBrakeRaw()`，滤波/四映射/双端死区/reverse 逐行保留；AC5 不允许 struct 强转（原版 `(hall_hw_config_t)*hw_config` 编不过）→直接结构赋值。
+- `app/app_brake.c/h`（新 128 行）：12bit 端点宏 `BRAKE_MAP_RAW_FULL/ZERO`（300/3600 初值），输出 0..1000；串口命令 **BR1=记松开端 adc_max / BR2=记捏死端 adc_min**（ISR 置请求沿 PRx 先例，任务侧执行，RAM 生效掉电丢）。
+- 协议 **cmd=0x04 刹车帧（14B）**：`AA55|len=9|0x04|seq|brake_raw(u16,滤后码)|brake_map(u16,0..1000)|flags(bit0=饱和)|tx_tick(u16)|crc16(覆盖前12B)`；独立 seq（v2.1 辅帧纪律），发送分频 `BRAKE_SEND_DIV`（默认 1=跟主帧 50Hz，占 115200 带宽 ~6%；未来 USART1 直连 GD 改 5）。**0x01 主帧布局一字未动**。
+- **调试模式 `RELAY_DEBUG_PRINT`（relay_config.h，当前=1）**：同一条 USART1 内容替换为 VOFA+ JustFloat 波形（ch0=raw/ch1=filtered/ch2=map/ch3=sat，20B 帧@100ms，帧尾 00 00 80 7F），relay_task 二进制帧停发；`app/debug_task.c/h`（结构参照云台 RM_Taurus_25 `app/debug_task`，其 bsp_debug.c 全注释死代码/DataScope 协议不可直接搬）。改回 0 重编恢复正式帧流。
+
+### 上板实测（2026-11-14，VOFA 波形）
+- 静态 raw≈926~994（磁铁耦合中段，非手册零点 3.0V≈3700 码）；**捏放全程 Δ=49 码（≈40mV）**——环形磁铁旋转式（转角仅 ~29°）+霍尔对旋转对称位=天然低灵敏几何。
+- **用户拍板：49 码先这样，不调几何**——理由：①几何调优麻烦（同事之前优化过效果一般）②刹车占骑行周期短③标记用途 SNR 6–12σ 够用（阈值+滞回判决）。标记=主用途成立；连续特征 4% 噪声勉强可用；弱点=端点漂移敏感（漂 1 码=2% 特征误差，靠 BR1/BR2 重标缓解）。
+- 改进项（不阻塞，训练阶段若刹车特征太粗再动）：霍尔挪到磁极分界线切向位+间隙 2–3mm+磁铁挪活动臂最大半径端，目标 Δ≥1000 码。
+- raw 锯齿噪声 ±7 码/2 帧周期（VOFA I0 通道 926↔940 交替）——嫌疑=双通道采样 crosstalk 或力矩线耦合；行程 49 码下占比 >10% 为主要误差源，行程拉大后 <1.5% 可忽略；未定因，挂账。
+
+### 烧录与探针纪律（本次实战两条）
+- 探针=有线 DAP **SN 1081747132**（COM34 那颗）；GD 那颗=SN 7047224032 勿混。**烧前必须芯片自证**：`openocd -c "adapter serial <SN>" … -c "mdw 0xE0042000"`——`0x…413`=STM32F407 可烧，`0x…419`=GD32F450 拒烧（11-14 实战拦截一次误烧 GD）。
+- **openocd `program … exit` 不带 reset → 目标保持 halt、串口静默（"烧录成功"≠"在跑"）**——必须显式 `-c "reset run"` 或 `program … reset exit`。本次 COM34 无输出即此坑。
+- 烧录命令模板（reset_config srst_only 会让 flash 算法超时，命令行覆盖）：
+  `openocd -c "adapter serial 1081747132" -f tools/openocd_f407_pwlink2.cfg -c "reset_config none" -c "program <bin> verify 0x08000000 exit" -c "init" -c "reset run" -c "shutdown"`
+
+### 接线（本次实装线色，只对这颗拆机件有效）
+红=VCC→3V3；紫=EN→**GND**（悬空/接 3.3V 不工作）；黄=Out→10k 串联→(100nF 到地)→**PA3**；绿=GND 共地。
+
+### 遗留待办
+- ⬜ BR1/BR2 实标端点（VOFA 波形下位置确认后）
+- ⬜ `RELAY_DEBUG_PRINT` 改回 0 重编重烧，恢复 0x01+0x04 正式帧流
+- ⬜ 解算台/录制端解析 0x04 帧（帧格式见上文协议段）
+- ⬜ raw 锯齿噪声定因（crosstalk 嫌疑，行程决定不改则挂账）
+
+## v2.3 变更（2026-11-14，刹车行程校准状态机；编译 0E/0W，已烧板上全流程 8/8 PASS）
+
+### 功能：对齐遥控器油门行程校准（rc_remote 0500716 状态机 + 008d31f 校准页语义）
+- **命令（ASCII 直发 USART1，回 0x05 事件帧）**：`BRC`=进校准(LO 追踪松开端 max)→`BRN`(切 HI 追踪捏死端 min)→`BRA`(apply：间隔≥BRAKE_CAL_MIN_SPAN=100 码才写端点，否则 FAIL 端点不动) / `BRX`(取消恢复备份端点) / `BRQ`(查询，IDLE 也回帧)。`BR1/BR2` 单点记录保留兼容。
+- **cmd=0x05 校准事件帧（16B）**：`AA55|len=11|0x05|seq|state(u8)|raw_min(u16)|raw_max(u16)|tick(u32)|crc16(前14B)`；state 枚举 0=IDLE/1=LO/2=HI/3=DONE_OK/4=FAIL/5=CANCELLED；独立 seq（v2.1 辅帧纪律）。
+- 实时曲线复用 0x04 帧流（50Hz brake_raw 滤波值），校准期间 UI 直接画曲线。
+- apply 后端点 RAM 生效掉电丢；事件帧带新端点值供 UI 显示。
+
+### 板上实测（2026-11-14，COM34 脚本驱动 8 项全 PASS）
+`BRQ→IDLE / BRC→LO / BRN→HI / BRA→FAIL(未真捏间隔<100 防呆拒绝✓) / BRQ→IDLE / BRC→LO / BRX→CANCELLED / BRQ→IDLE`；0x04 帧流持续（raw≈902 map=821，宏端点自洽）。
+- **修一真 bug**：`Brake_TakeCalEvent` 原把"state=IDLE 事件"与"无事件"混为同一返回值（均 0），IDLE 查询被吞——改为标志/状态分离（返回有无+出参 state）。
+- **烧录运维坑**：openocd `program…exit` 与后续 `reset run` 会话连发时目标可能不跑（PC=0x2000002e RAM 死态）——**分两次调用+中间 sleep 2s** 后稳定；判活三法（串口/BRQ 指令/openocd 读 PC）实战有效。
+
+### 平板校准 UI 流程（待 solver-dev 实现，语义对齐遥控器校准页）
+进校准页→发 BRC（提示"松开刹把捏放数轮"）→0x04 曲线观察→发 BRN（提示"捏到底保持数轮"）→发 BRA→0x05 DONE_OK 显示新端点（FAIL 则提示重试 BRN 阶段）；随时 BRX 取消。命令均为 3 字节 ASCII 直发 COM34。
+
+## v2.4 变更（2026-11-15，USART1 上行单一发送调度器；编译 0E/0W，未烧板）
+
+### 问题（2026-11-15 实车 30.9min，rec_20261115_002355）
+[PA] 37.8/s（应 50）、CRC 错 17,125 次≈24%；刹车活跃段 CRC 错/秒 7.93 vs 非活跃 4.59（+73%）、seq 缺口 7.39 vs 4.47。设备侧 [USB] drop/ovf/trunc 全 0、行/产=100% ⇒ 丢不在录制端。
+
+### 改动（单变量一刀：TX 调度解耦，不改帧格式/发送率/BSP/优先级）
+- **新增 `Comm/tx_sched.c/h`**：FreeRTOS 队列（深度 32×24B 定长帧槽）+ 专发送任务（AboveNormal、栈 256w、阻塞出队→Uart1_SendPush）。队列满=丢帧计数 `TxSched_GetDropped()`，绝不阻塞 relay_task。
+- `relay_task.c` 4 处直写（0x01 主帧/0x02 去皮事件/0x04 刹车/0x05 校准事件）→ `TxSched_PushUart`；`debug_task.c` VOFA 帧同改。USB 路径不动（另一条链无此问题）。
+- `freertos.c`：TxSched_Init 先于两任务创建（队列先于生产者就绪）+ txSchedTask 创建（debug/业务两模式都建）。
+- 产物：`kamingo_torque_relay_v24_txsched.bin` 43300B，md5 `990a5eee7eb9785e92c83b6236740893`（0E/0W）。
+
+### 与任务提示词的口径偏差（如实记）
+1. "0x01 与 0x04 未串行化"**不准确**：BSP 层早有 512B TX 环形队列+s_tx_busy 标志+双侧临界区 pump（2026-11-07 修过 ISR 死锁），且业务流下唯一调用方=relay_task 单任务（顺序天然）。本刀把"帧构造"与"字节发送"彻底解耦（BSP 调用只存在于单一消费者），串行化更严，但**若真因在 BSP 之下的字节流时序，此刀可能不改善 CRC**。
+2. **AI 的替代假设（未验证，不与主假设同刀测）**：0x04 插入使字节流从"16B+gap"变"30B 连续"，GD 侧 USART RX 若为逐字节中断无 DMA，IDLE gap 缩短→中断压力↑→RX overrun 丢字节→CRC 错，与刹车活跃+73% 同向。**验证法=判据已内嵌：本刀上台架后 CRC 错若不降，即指向 GD 侧接收（下一刀改 GD RX 或 BRAKE_SEND_DIV=5 降 0x04 率），勿同时调 BSP 优先级。**
+3. tx_tick 语义微变：现为"构造时刻"（BSP 环形队列时代本就如此），发送任务增加 μs 级转发延迟，远小于 tick 分辨率。
+
+### 待台架验收（板不在位，未烧）
+- 门1：台架 5min（力矩 50/s+刹车每 10s 一捏）[PA] CRC 错<1/s 且 ≥47/s
+- 门2：刹车活跃 vs 非活跃错帧率差 <20%（before：+73%）
+- 门3：tx_tick 单调、seq 连续
+- before：4.59 / 7.93（CRC 错每秒，非刹车/刹车中）

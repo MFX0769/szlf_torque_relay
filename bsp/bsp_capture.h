@@ -24,6 +24,7 @@ extern "C" {
 void Bsp_Capture_Init(void);
 uint16_t Bsp_Capture_GetRpmX10(void);
 uint8_t Bsp_Capture_IsTimeout(void);
+uint8_t Bsp_Capture_IsStale(void);
 uint32_t Bsp_Capture_GetPulseCount(void);
 
 #ifdef __cplusplus
